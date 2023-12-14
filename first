@@ -4,3 +4,472 @@ socket.write('Echo server\r\n');
 socket.pipe(socket);
 });
 server.listen(1337, '127.0.0.1');
+
+
+const { Console } = require('console');
+var net = require('net');
+//var sqlite3 = require('sqlite3');
+const assert = require('node:assert');
+const {
+    createECDH,
+  } = require('node:crypto');
+const { resolve } = require('path');
+const { rejects } = require('assert');
+var HOST = process.env.HOST||'127.0.0.1' ;
+var PORT = process.env.PORT||8080 ;
+
+
+//list of (socket,username) for connected users
+var connectedSockets = new Map();
+
+
+//list of (username, socket) for connected users
+var connectedUsers = new Map();
+
+// list of (groupName, list of banned users)
+var bannedUsers = new Map();
+// list of (groupName,groupStates) group states represent the captured messages related to the group
+var groupStates = new Map();
+
+//Broadcast function for connected sockets
+connectedSockets.broadcast = function (data, except) {
+    for(let sock of this.keys()) {
+        if(sock !== except){
+            sock.write(data);
+        }
+    }
+}
+
+
+
+// list of groups
+var groups= new Map();
+
+
+//list of group status
+var groupStatuses= new Map();
+
+//list of (group, list of [username, socket])
+var groupMembers= new Map();
+
+
+//list of (group, list of messages)
+var groupMessages= new Map();
+
+
+//list of invited members for a specific group
+
+var groupsInvitations= new Map();
+
+
+//List of socket shared Key
+var sharedKeys= new Map()
+
+// isEncrypted is a set of socket, encrypted or not True/False
+
+var isEncrypted= new Map()
+
+
+// bob represent the server in the Diffie-Hellman Model
+const bob = createECDH('secp521r1');
+var bobKey = bob.generateKeys();
+
+// Importing Cypher object for aes Encryption
+
+const { aesDecrypt } = require('./crypto');
+
+
+/*if(isEncrypted.get(socket)===true){
+
+}else{
+
+}*/
+
+
+
+
+
+var server = net.createServer((socket)=>{    
+    console.log('CONNECTED from ' + socket.remoteAddress + ':' + socket.remotePort);
+
+    isEncrypted.set(socket,false)
+
+    socket.on('data', function(data) {
+              console.log(data.toString())
+              msg = JSON.parse(data);
+
+            console.log('DATA received from ' + socket.remoteAddress + ':' + data);
+            switch(msg.action){
+                case 'client-hello': 
+                    connectedSockets.set(socket,msg.from);
+                    connectedUsers.set(msg.from,socket);
+                    socket.write(JSON.stringify({"sender-name":msg.from,"sender-ip":socket.remoteAddress+':'+socket.remotePort,"action":"server-hello","msg":"Welcome "+msg.from}));
+                    connectedSockets.broadcast(JSON.stringify({"senderName":"Server","msg":msg.from+" has joined the chat"}), socket);
+                break;
+                case 'client-send': 
+                    connectedSockets.get(connectedSockets.findbyValue(msg.to)).write(JSON.stringify({"senderName":msg.from,"action":"client-send","msg":msg.msg}));
+                break;
+                case 'client-broadcast': 
+                    connectedSockets.broadcast(JSON.stringify({"senderName":msg.from,"action":"client-broadcast","msg":msg.msg}), socket);
+                break;
+                case 'client-quit': 
+                    connectedSockets.broadcast(JSON.stringify({"senderName":msg.from,"action":"client-quit","msg":msg.from +" left the chat"}), socket);
+                    connectedSockets.delete(socket);
+                break;
+                case 'client-list-clients': 
+                    socket.write(JSON.stringify({"senderName":"server","action":"client-list-clients","msg":Array.from(connectedSockets.values())}));
+                break;
+                case 'client-error': 
+                    connectedSockets.delete(socket);
+                    connectedSockets.broadcast(JSON.stringify({"senderName":"server","action":"client-error","msg":msg.msg}), socket);
+                break;
+
+
+                //Adding new functionnalities from TD4
+                case 'cgroup':
+
+                            if(!groups.has(msg.group)){
+                                    if(msg.type==="private"||msg.type==="public"){
+                                        groups.set(msg.group,msg.sender);
+                                        groupsInvitations.set(msg.group,new Map())
+                                        groupStatuses.set(msg.group,msg.type)
+                                        //We save the socket of the user and the group owner name
+                                        var members= new Map();
+                                        members.set(msg.sender,socket);
+                                        groupMembers.set(msg.group,members);
+
+                                        //cerating message list
+                                        
+                                        groupMessages.set(msg.group,new Set());
+                                        bannedUsers.set(msg.group,new Set());
+                                        groupStates.set(msg.group,new Set());
+                                        (groupStates.get(msg.group)).add(JSON.stringify(msg));
+
+                                        //feedback to the client
+                                        socket.write(JSON.stringify({"group":msg.group,"action":"cgroup"}));
+                                }else{
+                                    socket.write(JSON.stringify({"msg":"Invalid type of group","action":"errornotif"}));
+                                }
+                            }else{
+                                socket.write(JSON.stringify({"msg":"This group already exists","action":"errornotif"}));
+
+                            }
+                    
+
+
+
+                    
+                break;
+
+                case 'join': 
+                    if(groups.has(msg.group)){
+                        var decision="";
+                        if(!(bannedUsers.get(msg.group)).has(msg.sender)){
+
+                            //Check if he is not in the group
+                            if((groupStatuses.get(msg.group)==="private"&&(groupsInvitations.get(msg.group)).has(msg.sender))||groupStatuses.get(msg.group)==="public"){ 
+                                    if(!(groupMembers.get(msg.group)).has(msg.sender) ) {
+
+                                        (groupMembers.get(msg.group)).set(msg.sender,socket);
+                                        console.log(msg.sender + "   Joined   "+ msg.group);
+
+                                        decision="Welcome to the group "+msg.group;
+                                        (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                                    }else{
+                                        decision="You are already in the group '"+msg.group;+"'";
+                                    }
+                                        //The user can acess
+                                }else{
+                                    decision="Can not access the group '"+msg.group+"' because it's private"
+                                }
+                        }else{
+                            //The user has been banned and is notify he can't access
+                            decision="Can not access to group '"+msg.group+"'you have been banned"
+                            
+                        }
+                        //feedback to user
+                        socket.write(JSON.stringify({"group":msg.group,"msg":decision,"action":"join"}));
+                    }else{
+                        socket.write(JSON.stringify({"msg":"This group does not exists","action":"errornotif"}));
+
+                    }
+                    
+                    ///Check if the user have been banned __if yes___ he cannot access the group
+                    
+                    
+                break;
+                case 'gbroadcast': 
+                    if((groupMembers.get(msg.group)).has(msg.sender)){
+                        //Member is here a couple of  group member: [0] and his connected socket: [1]
+                        for(let member of (groupMembers.get(msg.group)).values()){
+                            if(member !=socket){
+                                member.write(JSON.stringify({"senderName":msg.sender,"msg":msg.msg,"group":msg.group,"action":"gbroadcast"}));
+                            }
+                        }
+
+                        //adding to the group messages
+                        (groupMessages.get(msg.group)).add([msg.sender,msg.msg]);
+
+                        // Adding a new state about the sent message
+                        (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                
+                        //feedback to the client
+                         socket.write(JSON.stringify({"senderName":msg.sender,"msg":msg.msg,"group":msg.group,"action":"gbroadcast"}));
+
+                    }else{
+                         socket.write(JSON.stringify({"msg":"You are not a member first join the Group","action":"errornotif"}));
+
+                    }
+
+                    break;
+
+                case 'members': 
+                //Listing the group members
+                     var members="";
+                    //member is the member name
+
+                    // We concatenate group member names
+                    for(let member of (groupMembers.get(msg.group)).keys()){
+                         members=members+member+" ;"
+                    }
+                    socket.write(JSON.stringify({"group":msg.group,"members":members,"action":"members"}));
+
+                    //Adding the new state of members "ask for"
+                    (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                break;
+
+                case 'msgs': 
+
+                    if((groupMembers.get(groupMembers)).has(msg.sender)){
+                        socket.write(JSON.stringify({"group":msg.group,"msg":Array.from(groupMessages.get(msg.group)).join(" | "),"action":"messages"}));
+                                            //feedback
+                                            //We add the state of messages list "ask for"
+                                            (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                    }else{
+                        socket.write(JSON.stringify({"msg":"You are not a member first join the Group","action":"errornotif"}));
+
+                    }
+                    
+                    
+                break;
+
+                case 'groups': 
+                    //feedback
+                    //We Send to the requesting client the list of all available groups
+                    
+                    socket.write(JSON.stringify({"msg":Array.from(groups.keys()),"action":"groups"}));
+
+                break;
+
+                case 'leave': 
+                //Leave the group
+                    //groupMembers.get(msg.group) is the list of members of the group msg.group
+                    //We find out the member couple username-socket to retrieve it from the members
+                    if((groupMembers.get(msg.group)).has(msg.sender)){
+                        for(let member of (groupMembers.get(msg.group)).keys()){
+                            if(member===msg.sender){
+                                console.log(member +" want to leave "+msg.group);
+                            
+                                (groupMembers.get(msg.group)).delete(member);
+                                //feedback
+                                //We notify the member that he left
+                                socket.write(JSON.stringify({"msg":"You Left","group":msg.group,"action":"leave"}));
+                            } 
+                        }
+                        //We add the leave request to states
+                        (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                    }else{
+                        socket.write(JSON.stringify({"msg":"You are not a member first join the Group","action":"errornotif"}));
+
+                    }
+                    
+                    
+                break;
+                case 'invite': 
+                
+                    //Check if the sender is in the group          
+                    if((groupMembers.get(msg.group)).has(msg.sender)){
+                        //Check if the dest is not a group member
+                        if((groups.get(msg.group)===msg.sender)){
+
+                            if(!(groupMembers.get(msg.group)).has(msg.dest)){
+                                //Invite someone
+                                //We sent to the dest the invitation and save the state   
+
+                                (connectedUsers.get(msg.dest)).write(JSON.stringify({"msg":"You have been invited to ","group":msg.group,"senderName":msg.sender,"action":"invite"}));
+                                (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                            }else{
+                            socket.write(JSON.stringify({"msg":"This is already a member of '"+msg.group+"'","action":"errornotif"}));
+                                }
+                        }else{
+                            socket.write(JSON.stringify({"msg":"You Cannot invite someone you are not the Group Owner '"+msg.group+"'","action":"errornotif"}));
+        
+                        }     
+                    }else{
+                           socket.write(JSON.stringify({"msg":"You are not a member of '"+msg.group+"'","action":"errornotif"}));
+                   
+                    }                
+
+                 break;
+
+                case 'kick': 
+                 //check if the group has the sender
+                    if((groupMembers.get(msg.group)).has(msg.sender)){
+
+                        if((groups.get(msg.group)===msg.sender)){
+
+                                //Kick Someone check if the dest is in the group
+                            if((groupMembers.get(msg.group)).has(msg.dest)){
+                                for(let member of (groupMembers.get(msg.group)).keys()){
+                                if(member===msg.dest){
+                                
+                                    (groupMembers.get(msg.group)).delete(member);
+                                    //reply to dest client
+                                    (connectedUsers.get(msg.dest)).write(JSON.stringify({"msg":"You have been kicked from ","group":msg.group,"senderName":msg.sender,"action":"kick","reason":msg.reason}));
+                                    (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                                    } 
+                                }
+                            }else{
+                                //Inform the sender that the member is not in the group
+                                socket.write(JSON.stringify({"msg":"This is not a member the Group '"+msg.group+"'","action":"errornotif"}));
+                
+                            }
+                        }else{
+                            socket.write(JSON.stringify({"msg":"You are not the Group Owner can not kick someone '"+msg.group+"'","action":"errornotif"}));
+
+                        }
+
+                    }else{
+                            socket.write(JSON.stringify({"msg":"You are not a member of the group '"+msg.group+"'","action":"errornotif"}));
+                                
+                    }
+
+                   
+                break;
+
+                case 'ban': 
+
+                // Check if the sender is a member of the group
+                    if((groupMembers.get(msg.group)).has(msg.sender)){
+
+                        if((groups.get(msg.group)===msg.sender)){
+
+                        //Ban someone
+                        //We use a list Banned list to save banned users   
+                        /*We f nind out the user in the groupMembers and retrieve it; add his name to*
+                        bannedUsers.get(msg.group) list of banned from the group msg.group and notify him */
+                            //Kick Someone check if the dest is in the group
+                            if((groupMembers.get(msg.group)).has(msg.dest)){
+
+                                for(let member of (groupMembers.get(msg.group)).keys()){
+                                if(member===msg.dest){
+                                    
+                                    (groupMembers.get(msg.group)).delete(member);
+                                    (bannedUsers.get(msg.group)).add(msg.dest);
+        
+                                    (connectedUsers.get(msg.dest)).write(JSON.stringify({"msg":"You have been banned from ","group":msg.group,"senderName":msg.sender,"action":"ban","reason":msg.reason}));
+                                    socket.write(JSON.stringify({"msg":"You banned '"+msg.dest+"'"+"from your group","action":"errornotif"}));
+
+                                } 
+                                }
+                                (groupStates.get(msg.group)).add(JSON.stringify(msg));
+                            }else{
+                                socket.write(JSON.stringify({"msg":"This is not a member the Group '"+msg.group+"'","action":"errornotif"}));
+                
+                                }
+                        }else{
+                        socket.write(JSON.stringify({"msg":"You are not the Group Owner can not ban someone in '"+msg.group+"'","action":"errornotif"}));
+
+                        }
+
+                    }else{
+                    socket.write(JSON.stringify({"msg":"You are not a member of the group '"+msg.group+"'","action":"errornotif"}));
+                    
+                    }                    
+
+                break;
+
+                case 'unban': 
+                //Ban someone
+                        //We retrieve the user from bannendUsers list of msg.group
+                    if((groups.get(msg.group)===msg.sender)){
+
+                        if((bannedUsers.get(msg.group)).has(msg.dest)){
+                            (bannedUsers.get(msg.group)).delete(msg.dest);
+                            (groupStates.get(msg.group)).add(JSON.stringify(msg));
+
+                            // We inform the user
+                            (connectedUsers.get(msg.dest)).write(JSON.stringify({"msg":"You have been unbanned of ","group":msg.group,"senderName":msg.sender,"action":"unban"}));
+                            socket.write(JSON.stringify({"msg":"You Unbanned '"+msg.dest+"' from '"+msg.group+"'","action":"errornotif"}));
+
+                        }else{
+                        socket.write(JSON.stringify({"msg":"This is not a banned user '"+msg.group+"'","action":"errornotif"}));
+
+                        }
+                    }else{
+                            socket.write(JSON.stringify({"msg":"You are not the Group Owner can not unban someone in '"+msg.group+"'","action":"errornotif"}));
+
+                    }
+
+
+                     
+                     
+                    
+                break;
+                case 'states': 
+                    //Ban someone
+                        
+                    //We return the list of  all saved states about msg.group
+
+                    if((groups.get(msg.group)===msg.sender)){
+                            socket.write(JSON.stringify({"msg":Array.from((groupStates.get(msg.group))).join(" | "),"group":msg.group,"senderName":msg.sender,"action":"states"}));
+                            (bannedUsers.get(msg.group)).delete(msg.dest);
+                            console.log("States");
+                        }
+                    else{
+                        socket.write(JSON.stringify({"msg":"You are not the Group Owner can not view group states '"+msg.group+"'","action":"errornotif"}));
+
+                    }
+                    
+
+                break;
+
+                case 'encrypt':
+
+                    //Saving the generated shared secret bob.computeSecret(msg.genKey)
+                    
+                    var key=bob.computeSecret(Buffer.from(msg.genKey));
+                    
+                    sharedKeys.set(socket,key);
+                    socket.write(JSON.stringify({"msg":"ECDH runs Well a Key is shared now","genKey":bobKey,"action":"encrypt"}));
+                    //socket.write(JSON.stringify({"msg":"You are not the Group Owner can not view group states '"+""+"'","action":"errornotif"}));
+                    isEncrypted.set(socket,true)
+                break;
+
+                case 'decrypt':
+
+                        //Saving the generated shared secret bob.computeSecret(msg.genKey)
+                        
+                    socket.write(JSON.stringify({"msg":"Request for no more secure exchange","genKey":bobKey,"action":"decrypt"}));
+                            //socket.write(JSON.stringify({"msg":"You are not the Group Owner can not view group states '"+""+"'","action":"errornotif"}));
+                    isEncrypted.set(socket,false)                
+                
+                
+                break;
+
+
+                default:
+                    console.log(msg);
+            }
+        });
+    }).listen(PORT, HOST);
+
+
+
+
+
+
+
+
+
+
